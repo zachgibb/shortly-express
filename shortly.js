@@ -11,6 +11,8 @@ var User = require('./app/models/user');
 var Links = require('./app/collections/links');
 var Link = require('./app/models/link');
 var Click = require('./app/models/click');
+var Session = require('express-session');
+var cookieParser = require('cookie-parser');
 
 var app = express();
 
@@ -26,18 +28,36 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.static(__dirname + '/public'));
 
+app.use(cookieParser('supersecretstring'));
+app.use(Session());
 
-app.get('/', 
+db.knex('users')
+        .select('*')
+        .then(function(results){
+          console.log(results);
+        });
+
+var restrict = function(req, res, next) {
+  console.log(req.session.user);
+  if (req.session.user) {
+    next();
+  } else {
+    req.session.error = 'Access Denied';
+    res.redirect('/login');
+  }
+};
+
+app.get('/', restrict,
 function(req, res) {
   res.render('index');
 });
 
-app.get('/create', 
+app.get('/create', restrict,
 function(req, res) {
   res.render('index');
 });
 
-app.get('/links', 
+app.get('/links', restrict,
 function(req, res) {
   Links.reset().fetch().then(function(links) {
     res.send(200, links.models);
@@ -46,6 +66,12 @@ function(req, res) {
 
 app.get('/login',
 function(req, res) {
+  res.render('login');
+});
+
+app.get('/logout',
+function(req, res) {
+  req.session.destroy();
   res.render('login');
 });
 
@@ -97,31 +123,26 @@ function(req, res) {
   var username = req.body.username;
   var password = req.body.password;
   
-  // Connect with the table "users"
-  db.knex('users')
-    // Get the user that matches the given username
-    .where('username', '=', username)
-    // select the 'salt' field
-    .select('salt')
-    .then(function(results){
 
-      // if there is a salt in there,
-      if (results.length) {
-        // return the salt
-        return results[0];
-      } 
-
-      // else tell client about failure
-      res.end("User Does not exist"); 
-
-    })
-    .then(function(salt){
-      // hash the salt and the password
-      return bcrypt.hashAsync(password, salt, null);
-    })
-    .then(function(hash){
-      // check the hash to the password in the database
-      console.log('should be hash: ', hash);
+  new User({username: username})
+    .fetch()
+    .then(function(model) {
+      console.log("Model: ", model);
+      if (model) {
+        bcrypt.compareAsync(password, model.get('password')).then(function(exists){
+          console.log('response from bcrypt: ', exists);
+          if (exists) {
+            req.session.regenerate(function() {
+              req.session.user = model;
+              res.redirect('/');
+            });
+          } else {
+            res.end("Wrong password.");
+          }
+        });
+      } else {
+        res.end("User does not exist.");
+      }
     });
 
 });
@@ -133,36 +154,37 @@ function(req, res) {
   var password = req.body.password;
   var dbsalt;
   // check users table for username
-  db.knex('users')
-    .where('username', '=', username)
-    .select('username')
-    .then(function(exists) {
 
-      // if username doesn't exist
-      if (!exists.length) {
-        // generate salt, and pass it on
-        return bcrypt.genSaltAsync(10);
+
+  new User({
+    username: username
+  }).fetch()
+    .then(function(model) {
+      if (model) {
+        res.end('Username already exists');
       } else {
-        // tell user of failure
-        res.end("Please choose a new username.");
+        bcrypt.genSaltAsync(10)
+          .then(function(salt){
+
+            bcrypt.hashAsync(password, salt, null)
+              .then(function(hash){
+
+                new User({
+                  username: username,
+                  password: hash,
+                  salt: salt
+                }).save()
+                  .then(function(usermodel){
+                    req.session.regenerate(function(){
+                      req.session.user = usermodel;
+                      res.redirect('/');
+                    });
+                  });
+
+              });
+
+          });
       }
-    })
-    .then(function(salt) {
-      // generate and pass on hash of password and salt
-      dbsalt = salt;
-      return bcrypt.hashAsync(password, salt, null);
-    })
-    .then(function(hash){
-      console.log('should be hash for new user: ', hash);
-      console.log('should be salt for new user: ', dbsalt);
-      
-      // add new user to table, with username, hash, and salt
-      new User({
-        username: username,
-        password: hash,
-        salt: dbsalt
-      })
-      .save();
     });
 
 });
